@@ -3,8 +3,9 @@
 /**
  * 多纸型成本排产
  *
- * 在 2～8 种候选纸张（名称、宽高、单价、可用张数）之间逐轮择优：
- * 每轮对“仍有库存且能放入余件”的每种纸型调用现有单张排样 layout()，
+ * 在 2～8 种候选纸张（名称、宽高、纹向、单价、可用张数）之间逐轮择优：
+ * 每轮对“仍有库存且能放入余件”的每种纸型调用现有单张排样 layout()
+ * （纹向约束与单张一致：只采用纸张纹向与成品要求平行的朝向），
  * 按以下顺序选出下一张纸：
  *   1. 单位已排成品面积成本（元 / m²）最低；
  *   2. 同分时本张已排件数多；
@@ -13,10 +14,12 @@
  *   - 全部完成            → stopReason: 'completed'
  *   - 库存全部耗尽        → stopReason: 'stock-exhausted'
  *   - 有库存纸型均无进展  → stopReason: 'no-progress'
- * 空白纸（排不进任何余件）绝不计入结果：不扣库存、不入选。
+ * 因尺寸或纹向限制排不进任何余件的纸型不参与当轮选择（即可行候选排名
+ * 已排除纹向不可行的纸型）；空白纸（排不进任何余件）绝不计入结果：
+ * 不扣库存、不入选。
  */
 
-const { layout } = require('./packer');
+const { layout, normalizePaperGrain, normalizeProductGrain } = require('./packer');
 
 const MM2_PER_M2 = 1_000_000;
 const MAX_SHEETS = 500;
@@ -27,7 +30,7 @@ const round2 = (v) => Math.round(v * 100) / 100;
 
 /**
  * 校验并规范化候选纸型列表。
- * @returns 规范化后的纸型：{ id, name, width, height, price, stock }
+ * @returns 规范化后的纸型：{ id, name, width, height, grain, price, stock }
  */
 function normalizePapers(rawPapers) {
   if (!Array.isArray(rawPapers)) throw new Error('缺少候选纸张列表（papers）');
@@ -43,6 +46,7 @@ function normalizePapers(rawPapers) {
     const height = Number(p.height);
     const price = Number(p.price);
     const stock = Number(p.stock);
+    const grain = normalizePaperGrain(p.grain, `第 ${pos} 种纸张`);
 
     if (!Number.isFinite(width) || width <= 0) {
       throw new Error(`第 ${pos} 种纸张的宽必须大于 0`);
@@ -63,6 +67,7 @@ function normalizePapers(rawPapers) {
       name: trimmed || `纸型${pos}`,
       width,
       height,
+      grain,
       price,
       stock,
     };
@@ -73,8 +78,10 @@ function normalizePapers(rawPapers) {
  * 主入口
  * @param {object} input
  *   kerf: number(mm)
- *   papers: [{ name?, width, height, price, stock }]（2～8 种）
- *   products: [{ id?, name?, width, height, quantity }]
+ *   papers: [{ name?, width, height, grain?, price, stock }]（2～8 种，
+ *     grain 为 'along-width' | 'along-height'，缺省沿宽）
+ *   products: [{ id?, name?, width, height, quantity,
+ *     grain?: 'any' | 'along-width' | 'along-height' }]（纹向要求，缺省不限）
  * @returns 逐张纸型、布局、选择指标、各纸型用量、总成本、剩余件数与终止原因
  */
 function layoutCostBatch(input) {
@@ -85,10 +92,11 @@ function layoutCostBatch(input) {
   const papers = normalizePapers(input.papers);
   if (!Array.isArray(input.products)) throw new Error('缺少成品列表');
 
-  // 先做一次探路排样：复用单张校验（非法成品直接抛错），并取得总需求
+  // 先做一次探路排样：复用单张校验（非法成品/纹向直接抛错），并取得总需求
   const probe = layout({
     paperW: papers[0].width,
     paperH: papers[0].height,
+    paperGrain: papers[0].grain,
     kerf,
     products: input.products,
   });
@@ -126,11 +134,13 @@ function layoutCostBatch(input) {
         name: p.name,
         width: p.width,
         height: p.height,
+        grain: p.grain,
         price: p.price,
         stock: p.stock,
         used: 0,
         remainingStock: p.stock,
         cost: 0,
+        placedArea: 0,
       })),
       remaining: [],
     };
@@ -141,12 +151,13 @@ function layoutCostBatch(input) {
   const costSum = new Map(papers.map((p) => [p.id, 0]));
   const placedAreaSum = new Map(papers.map((p) => [p.id, 0]));
 
-  // 规范化首轮需求（后续轮次由上一张的 unplaced 映射而来，结构一致）
+  // 规范化首轮需求（后续轮次由上一张的 unplaced 映射而来，纹向随件保留）
   const initialDemand = input.products.map((p, idx) => ({
     id: p.id != null ? String(p.id) : `P${idx + 1}`,
     name: p.name && String(p.name).trim() ? String(p.name).trim() : '',
     width: Number(p.width),
     height: Number(p.height),
+    grain: normalizeProductGrain(p.grain, idx + 1),
     quantity: Math.floor(Number(p.quantity)),
   })).filter((p) => p.quantity > 0);
   let demand = initialDemand;
@@ -164,18 +175,23 @@ function layoutCostBatch(input) {
       break;
     }
 
-    // 对每种仍有库存的纸型调用现有单张排样
+    // 对每种仍有库存的纸型调用现有单张排样（含各自纹向约束）
     const candidates = [];
+    const blockedResults = []; // 有库存但零件的排样结果（用于诊断尺寸/纹向受阻）
     for (const p of papers) {
       if (stock.get(p.id) <= 0) continue;
       const result = layout({
         paperW: p.width,
         paperH: p.height,
+        paperGrain: p.grain,
         kerf,
         products: demand,
       });
       const piecesPlaced = result.stats.piecesPlaced;
-      if (piecesPlaced === 0) continue; // 空白纸：不可选、不计入
+      if (piecesPlaced === 0) {
+        blockedResults.push(result); // 空白纸：不可选、不计入
+        continue;
+      }
       // 选择指标：单位已排成品面积成本（元 / m²）
       const placedArea = round3(result.stats.placedArea);
       const rawCostPerM2 = (p.price / placedArea) * MM2_PER_M2;
@@ -192,13 +208,22 @@ function layoutCostBatch(input) {
     }
 
     if (candidates.length === 0) {
-      // 有库存的纸型全部排不进任何余件：无进展止损。
-      // 本轮未排任何纸，剩余即当前需求（首轮时据此回填全部需求）
+      // 有库存的纸型全部排不进任何余件（尺寸或纹向限制）：无进展止损。
+      // 本轮未排任何纸、不扣库存，剩余即当前需求（首轮时据此回填全部需求）。
+      // 受阻原因取各有库存纸型排样结果的并集：任一纸型因纹向受阻即标记。
+      const grainBlockedById = new Map();
+      for (const res of blockedResults) {
+        for (const u of res.unplaced) {
+          if (u.grainBlocked) grainBlockedById.set(u.id, true);
+        }
+      }
       lastUnplaced = demand.map((d) => ({
         id: d.id,
         name: d.name,
         width: d.width,
         height: d.height,
+        grain: d.grain,
+        grainBlocked: grainBlockedById.get(d.id) || false,
         quantity: d.quantity,
       }));
       stopReason = 'no-progress';
@@ -233,6 +258,7 @@ function layoutCostBatch(input) {
       paperName: p.name,
       paperWidth: p.width,
       paperHeight: p.height,
+      paperGrain: p.grain,
       price: p.price,
       piecesPlaced: best.piecesPlaced,
       placedArea: best.placedArea,
@@ -261,6 +287,7 @@ function layoutCostBatch(input) {
       name: u.name,
       width: u.width,
       height: u.height,
+      grain: u.grain,
       quantity: u.quantity,
     }));
   }
@@ -277,6 +304,8 @@ function layoutCostBatch(input) {
       name: u.name,
       width: u.width,
       height: u.height,
+      grain: u.grain,
+      grainBlocked: !!u.grainBlocked,
       total,
       placed: total - u.quantity,
       quantity: u.quantity,
@@ -291,6 +320,7 @@ function layoutCostBatch(input) {
       name: p.name,
       width: p.width,
       height: p.height,
+      grain: p.grain,
       price: p.price,
       stock: p.stock,
       used,

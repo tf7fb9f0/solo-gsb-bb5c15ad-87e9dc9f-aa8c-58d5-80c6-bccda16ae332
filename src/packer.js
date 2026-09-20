@@ -5,14 +5,53 @@
  *
  * 规则：
  *  - 每次切割把当前矩形区域一分为二（刀缝宽 kerf 居中于切口带）
- *  - 成品允许旋转 90°
+ *  - 成品允许旋转 90°，但受纹向约束：纸张纹向（沿宽/沿高）与成品要求
+ *    （不限/沿自身宽/沿自身高）平行时才允许该朝向
  *  - 切割带与成品互不重叠，即切割不侵占成品
- *  - 排不下的成品保留在 unplaced 列表中
+ *  - 排不下的成品保留在 unplaced 列表中（注明尺寸/纹向受阻原因）
  */
 
 const EPS = 1e-6;
 
 const round3 = (v) => Math.round(v * 1000) / 1000;
+
+/* ---------------- 纹向（grain direction） ---------------- */
+
+const PAPER_GRAINS = ['along-width', 'along-height'];
+const PRODUCT_GRAINS = ['any', 'along-width', 'along-height'];
+
+/** 规范化纸张纹向：缺省沿宽（对“不限”成品无影响，保持旧行为） */
+function normalizePaperGrain(value, subject = '纸张') {
+  if (value == null || value === '') return 'along-width';
+  const s = String(value);
+  if (!PAPER_GRAINS.includes(s)) {
+    throw new Error(`${subject}纹向必须是 along-width（沿宽）或 along-height（沿高）`);
+  }
+  return s;
+}
+
+/** 规范化成品纹向要求：缺省不限 */
+function normalizeProductGrain(value, pos) {
+  if (value == null || value === '') return 'any';
+  const s = String(value);
+  if (!PRODUCT_GRAINS.includes(s)) {
+    throw new Error(
+      `第 ${pos} 种成品的纹向要求必须是 any（不限）、along-width（沿自身宽）或 along-height（沿自身高）`
+    );
+  }
+  return s;
+}
+
+/**
+ * 纹向是否允许某放置朝向（两者纹向平行才可采用）：
+ *  - 不限（any）：两种朝向均可；
+ *  - 未旋转：成品宽 ∥ 纸张宽，要求须与纸张纹向一致；
+ *  - 旋转 90°：成品宽 ∥ 纸张高，要求须与纸张纹向相反。
+ */
+function grainAllows(productGrain, paperGrain, rotated) {
+  if (productGrain === 'any') return true;
+  return rotated ? productGrain !== paperGrain : productGrain === paperGrain;
+}
 
 /** 数组字典序比较：a < b（元素均为数字） */
 function lexLess(a, b) {
@@ -160,7 +199,9 @@ function collectFreeLeaves(node, out) {
  * 主入口
  * @param {object} input
  *   paperW, paperH, kerf: number(mm)
- *   products: [{ id?, name?, width, height, quantity }]
+ *   paperGrain: 'along-width' | 'along-height'（纸张纹向，缺省沿宽）
+ *   products: [{ id?, name?, width, height, quantity,
+ *                grain?: 'any' | 'along-width' | 'along-height' }]（纹向要求，缺省不限）
  * @returns 布局结果（坐标单位均为 mm，原点在左上角）
  */
 function layout(input) {
@@ -172,6 +213,7 @@ function layout(input) {
   }
   if (paperW <= 0 || paperH <= 0) throw new Error('纸张宽高必须大于 0');
   if (kerf < 0) throw new Error('刀缝宽度不能为负');
+  const paperGrain = normalizePaperGrain(input.paperGrain);
   if (!Array.isArray(input.products)) throw new Error('缺少成品列表');
 
   // 展开为单件列表
@@ -188,13 +230,14 @@ function layout(input) {
     if (!Number.isFinite(q) || q < 0) {
       throw new Error(`第 ${idx + 1} 种成品的数量无效`);
     }
+    const grain = normalizeProductGrain(p.grain, idx + 1);
     const id = p.id != null ? String(p.id) : `P${idx + 1}`;
     const name = p.name && String(p.name).trim() ? String(p.name).trim() : '';
     for (let n = 1; n <= q; n++) {
-      pieces.push({ id, name, w, h, pieceNo: n });
+      pieces.push({ id, name, w, h, grain, pieceNo: n });
     }
     totalPieces += q;
-    if (q > 0) unplaced.push({ id, name, width: w, height: h, quantity: q });
+    if (q > 0) unplaced.push({ id, name, width: w, height: h, grain, quantity: q });
   });
 
   // 大件优先：最长边降序，再按面积、最短边
@@ -218,12 +261,18 @@ function layout(input) {
 
     for (const leaf of freeLeaves) {
       for (const piece of remaining.keys()) {
-        // 不旋转
-        if (piece.w <= leaf.w + EPS && piece.h <= leaf.h + EPS) {
+        // 不旋转（成品宽 ∥ 纸张宽）：纹向平行才考虑
+        if (
+          grainAllows(piece.grain, paperGrain, false) &&
+          piece.w <= leaf.w + EPS && piece.h <= leaf.h + EPS
+        ) {
           consider(leaf, piece, false, kerf);
         }
-        // 旋转 90°
-        if (piece.h <= leaf.w + EPS && piece.w <= leaf.h + EPS) {
+        // 旋转 90°（成品宽 ∥ 纸张高）：纹向平行才考虑
+        if (
+          grainAllows(piece.grain, paperGrain, true) &&
+          piece.h <= leaf.w + EPS && piece.w <= leaf.h + EPS
+        ) {
           consider(leaf, piece, true, kerf);
         }
       }
@@ -304,6 +353,9 @@ function layout(input) {
         specH: p.h,
         rotated: !!p.rotated,
         pieceNo: p.pieceNo,
+        grain: p.grain, // 成品的纹向要求
+        // 排样只采用纹向平行的朝向，已排成品必然满足其纹向要求
+        grainOk: grainAllows(p.grain, paperGrain, !!p.rotated),
       });
       return;
     }
@@ -341,17 +393,29 @@ function layout(input) {
 
   frees.sort((a, b) => b.area - a.area);
 
+  // 未排件受阻原因：忽略纹向时某自由区域几何上能放下（任一朝向），
+  // 但纹向允许的朝向放不下 → 纹向受阻；否则为尺寸不足
+  const fitsAnyOrientation = (u) => freeLeaves.some((leaf) => (
+    (u.width <= leaf.w + EPS && u.height <= leaf.h + EPS) ||
+    (u.height <= leaf.w + EPS && u.width <= leaf.h + EPS)
+  ));
+
   const unplacedList = unplaced
     .map((u) => ({
       id: u.id,
       name: u.name,
       width: u.width,
       height: u.height,
+      grain: u.grain,
       total: u.quantity,
       placed: placedById[u.id] || 0,
       quantity: u._unplaced || 0,
     }))
-    .filter((u) => u.quantity > 0);
+    .filter((u) => u.quantity > 0)
+    .map((u) => ({
+      ...u,
+      grainBlocked: u.grain !== 'any' && fitsAnyOrientation(u),
+    }));
 
   const paperArea = paperW * paperH;
   const placedArea = items.reduce((s, it) => s + it.w * it.h, 0);
@@ -359,7 +423,7 @@ function layout(input) {
   const ratio = paperArea > 0 ? placedArea / paperArea : 0;
 
   return {
-    paper: { width: round3(paperW), height: round3(paperH), kerf: round3(kerf) },
+    paper: { width: round3(paperW), height: round3(paperH), kerf: round3(kerf), grain: paperGrain },
     stats: {
       paperArea: round3(paperArea),
       placedArea: round3(placedArea),
@@ -378,14 +442,14 @@ function layout(input) {
 }
 
 /**
- * 批量排产：按与 layout() 完全相同的断头台规则逐张排样。
+ * 批量排产：按与 layout() 完全相同的断头台规则（含纹向约束）逐张排样。
  * 每张纸排完后，从剩余需求中扣除该张已排数量（直接以该张的
- * unplaced 作为下一张的需求清单），直到满足任一终止条件：
+ * unplaced 作为下一张的需求清单，纹向要求随件保留），直到满足任一终止条件：
  *  - 全部成品排完           → stopReason: 'completed'
  *  - 已用纸张达到 maxSheets → stopReason: 'max-sheets'
  *  - 某张纸一件成品都排不进 → stopReason: 'no-progress'
- *    （该空白纸不计入结果并立即停止，绝不输出空白纸；
- *      循环上界为 maxSheets 且每张至少排入一件，必然终止）
+ *    （尺寸或纹向限制均可能导致；该空白纸不计入结果并立即停止，
+ *      绝不输出空白纸；循环上界为 maxSheets 且每张至少排入一件，必然终止）
  *
  * @param {object} input  同 layout()，另需 maxSheets：正整数（≤500）
  * @returns {{
@@ -402,7 +466,7 @@ function layoutBatch(input) {
   }
   if (maxSheets > 500) throw new Error('最多用纸张数不能超过 500');
 
-  // 首轮直接透传原始清单，纸张/成品校验由 layout 完成
+  // 首轮直接透传原始清单，纸张/成品/纹向校验由 layout 完成
   let demand = input.products;
   const originalTotal = new Map(); // id → 原始需求件数
   const sheets = [];
@@ -417,6 +481,7 @@ function layoutBatch(input) {
     const result = layout({
       paperW: input.paperW,
       paperH: input.paperH,
+      paperGrain: input.paperGrain,
       kerf: input.kerf,
       products: demand,
     });
@@ -449,12 +514,13 @@ function layoutBatch(input) {
       break;
     }
 
-    // 扣除本张已排数量，剩余需求进入下一张纸
+    // 扣除本张已排数量，剩余需求（含纹向要求）进入下一张纸
     demand = result.unplaced.map((u) => ({
       id: u.id,
       name: u.name,
       width: u.width,
       height: u.height,
+      grain: u.grain,
       quantity: u.quantity,
     }));
   }
@@ -466,6 +532,8 @@ function layoutBatch(input) {
       name: u.name,
       width: u.width,
       height: u.height,
+      grain: u.grain,
+      grainBlocked: !!u.grainBlocked,
       total,
       placed: total - u.quantity,
       quantity: u.quantity,
@@ -490,4 +558,10 @@ function layoutBatch(input) {
   };
 }
 
-module.exports = { layout, layoutBatch };
+module.exports = {
+  layout,
+  layoutBatch,
+  grainAllows,
+  normalizePaperGrain,
+  normalizeProductGrain,
+};

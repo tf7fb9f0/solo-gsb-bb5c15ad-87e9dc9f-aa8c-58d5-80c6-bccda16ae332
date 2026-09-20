@@ -113,7 +113,7 @@ body {
 .cost-opts .hint { margin: 0 0 10px; line-height: 1.6; }
 .papers-head {
   display: grid;
-  grid-template-columns: 1.4fr 0.75fr 0.75fr 1fr 0.9fr 30px;
+  grid-template-columns: 1.3fr 0.7fr 0.7fr 0.95fr 0.95fr 0.8fr 30px;
   gap: 6px;
   font-size: 12px;
   color: var(--muted);
@@ -121,12 +121,12 @@ body {
 }
 .paper-row {
   display: grid;
-  grid-template-columns: 1.4fr 0.75fr 0.75fr 1fr 0.9fr 30px;
+  grid-template-columns: 1.3fr 0.7fr 0.7fr 0.95fr 0.95fr 0.8fr 30px;
   gap: 6px;
   margin-bottom: 8px;
   align-items: center;
 }
-.paper-row input { padding: 6px 8px; }
+.paper-row input, .paper-row select { padding: 6px 8px; }
 .paper-row .del {
   border: none;
   background: transparent;
@@ -269,9 +269,15 @@ input:focus, select:focus {
   box-shadow: 0 0 0 3px rgba(28, 100, 242, 0.15);
 }
 
+.products-hint {
+  margin: -6px 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
 .products-head {
   display: grid;
-  grid-template-columns: 1.5fr 0.8fr 0.8fr 0.7fr 34px;
+  grid-template-columns: 1.4fr 0.75fr 0.75fr 0.65fr 0.95fr 34px;
   gap: 8px;
   font-size: 12px;
   color: var(--muted);
@@ -279,11 +285,12 @@ input:focus, select:focus {
 }
 .products-row {
   display: grid;
-  grid-template-columns: 1.5fr 0.8fr 0.8fr 0.7fr 34px;
+  grid-template-columns: 1.4fr 0.75fr 0.75fr 0.65fr 0.95fr 34px;
   gap: 8px;
   margin-bottom: 8px;
   align-items: center;
 }
+.products-row select { padding: 6px 6px; font-size: 12.5px; }
 .products-row .del {
   border: none;
   background: transparent;
