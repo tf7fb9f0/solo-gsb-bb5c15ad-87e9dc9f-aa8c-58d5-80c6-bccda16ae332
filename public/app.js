@@ -18,7 +18,34 @@ function colorFor(id) {
   return PALETTE[h % PALETTE.length];
 }
 
-function addProductRow(name = '', w = '', h = '', qty = '') {
+const GRAIN_PRODUCT_OPTIONS = [
+  ['any', '不限'],
+  ['width', '沿自身宽'],
+  ['height', '沿自身高'],
+];
+const GRAIN_PAPER_OPTIONS = [
+  ['width', '沿宽'],
+  ['height', '沿高'],
+];
+
+function grainSelect(cls, options, value) {
+  const opts = options.map(([v, label]) =>
+    `<option value="${v}"${v === value ? ' selected' : ''}>${label}</option>`
+  ).join('');
+  return `<select class="${cls}">${opts}</select>`;
+}
+
+function grainProductLabel(g) {
+  const hit = GRAIN_PRODUCT_OPTIONS.find(([v]) => v === g);
+  return hit ? hit[1] : g;
+}
+
+function grainPaperLabel(g) {
+  const hit = GRAIN_PAPER_OPTIONS.find(([v]) => v === g);
+  return hit ? hit[1] : g;
+}
+
+function addProductRow(name = '', w = '', h = '', qty = '', grain = 'any') {
   const row = document.createElement('div');
   row.className = 'products-row';
   row.innerHTML = `
@@ -26,6 +53,7 @@ function addProductRow(name = '', w = '', h = '', qty = '') {
     <input type="number" class="p-w" min="0" step="0.1" placeholder="宽" value="${w}" />
     <input type="number" class="p-h" min="0" step="0.1" placeholder="高" value="${h}" />
     <input type="number" class="p-q" min="0" step="1" placeholder="数量" value="${qty}" />
+    ${grainSelect('p-grain', GRAIN_PRODUCT_OPTIONS, grain)}
     <button type="button" class="del" title="删除该行">✕</button>
   `;
   row.querySelector('.del').addEventListener('click', () => {
@@ -36,13 +64,14 @@ function addProductRow(name = '', w = '', h = '', qty = '') {
 
 /* ---------------- 多纸型候选表格 ---------------- */
 
-function addPaperRow(name = '', w = '', h = '', price = '', stock = '') {
+function addPaperRow(name = '', w = '', h = '', price = '', stock = '', grain = 'width') {
   const row = document.createElement('div');
   row.className = 'paper-row';
   row.innerHTML = `
     <input type="text" class="pp-name" placeholder="如：大度全张 / A3" value="${name}" />
     <input type="number" class="pp-w" min="0" step="0.1" placeholder="宽" value="${w}" />
     <input type="number" class="pp-h" min="0" step="0.1" placeholder="高" value="${h}" />
+    ${grainSelect('pp-grain', GRAIN_PAPER_OPTIONS, grain)}
     <input type="number" class="pp-price" min="0" step="0.01" placeholder="单价" value="${price}" />
     <input type="number" class="pp-stock" min="0" max="500" step="1" placeholder="张数" value="${stock}" />
     <button type="button" class="del" title="删除该纸型">✕</button>
@@ -59,6 +88,7 @@ function readProducts() {
     const width = Number(row.querySelector('.p-w').value);
     const height = Number(row.querySelector('.p-h').value);
     const quantity = Number(row.querySelector('.p-q').value);
+    const grain = row.querySelector('.p-grain').value;
     if (!width && !height && !quantity) return; // 空行跳过
     if (!(width > 0) || !(height > 0) || !(Number.isInteger(quantity) && quantity >= 0)) {
       throw new Error(`第 ${i + 1} 行成品：宽高须为正数，数量须为非负整数。`);
@@ -66,7 +96,7 @@ function readProducts() {
     if (quantity > 0) {
       products.push({
         name: row.querySelector('.p-name').value.trim(),
-        width, height, quantity,
+        width, height, quantity, grain,
       });
     }
   });
@@ -79,6 +109,7 @@ function readPapers() {
     const name = row.querySelector('.pp-name').value.trim();
     const width = Number(row.querySelector('.pp-w').value);
     const height = Number(row.querySelector('.pp-h').value);
+    const grain = row.querySelector('.pp-grain').value;
     const price = Number(row.querySelector('.pp-price').value);
     const stock = Number(row.querySelector('.pp-stock').value);
     const inputs = ['.pp-w', '.pp-h', '.pp-price', '.pp-stock'];
@@ -94,7 +125,7 @@ function readPapers() {
     if (!(Number.isInteger(stock) && stock >= 0 && stock <= 500)) {
       throw new Error(`第 ${pos} 种纸张：可用张数必须是 0～500 的整数。`);
     }
-    papers.push({ name, width, height, price, stock });
+    papers.push({ name, width, height, grain, price, stock });
   });
   if (papers.length < 2) throw new Error('多纸型成本排产至少需要 2 种候选纸张。');
   if (papers.length > 8) throw new Error('候选纸张最多为 8 种。');
@@ -117,7 +148,11 @@ function readForm() {
     throw new Error('纸张宽高必须为正数。');
   }
 
-  const payload = { paperW, paperH, kerf, products: readProducts() };
+  const payload = {
+    paperW, paperH, kerf,
+    paperGrain: $('paperGrain').value,
+    products: readProducts(),
+  };
 
   if (mode === 'batch') {
     const maxSheets = Number($('maxSheets').value);
@@ -192,7 +227,7 @@ function renderSvg(r) {
     fill: '#ffffff', stroke: '#1f2933', 'stroke-width': 1.5,
   });
 
-  // 纸张尺寸标注
+  // 纸张尺寸标注（含纹向）
   text(svgW / 2, margin - 14, `${fmt(paper.width)} mm`, {
     'text-anchor': 'middle', 'font-size': 12, fill: '#1f2933',
   });
@@ -200,6 +235,11 @@ function renderSvg(r) {
     'text-anchor': 'middle', 'font-size': 12, fill: '#1f2933',
     transform: `rotate(-90 ${margin - 12} ${svgH / 2})`,
   });
+  if (paper.grain) {
+    text(svgW - margin, margin - 14, `纹向：${grainPaperLabel(paper.grain)}`, {
+      'text-anchor': 'end', 'font-size': 12, fill: '#846219',
+    });
+  }
 
   // 余料区（淡灰网格感）
   for (const f of r.frees) {
@@ -258,7 +298,11 @@ function renderSvg(r) {
       label,
       `${fmt(it.specW)}×${fmt(it.specH)}${it.rotated ? ' ⟳90°' : ''}`,
     ];
-    const pieceText = `#${it.pieceNo}`;
+    // 纹向匹配状态：有纹向要求的成品标注实际是否平行匹配
+    const grainMark = it.grain && it.grain !== 'any'
+      ? ` 纹${it.grain === 'width' ? '沿宽' : '沿高'}${it.grainOk ? '✓' : '✗'}`
+      : '';
+    const pieceText = `#${it.pieceNo}${grainMark}`;
     const lineH = fs + 2;
     text(cx, cy - lineH + 3, lines[0], {
       'text-anchor': 'middle', 'font-size': fs, 'font-weight': 700, fill: '#212529',
@@ -321,6 +365,7 @@ function renderUnplaced(r, heading = '排不下的成品') {
     <tr>
       <td>${u.name ? `${u.name}（${u.id}）` : u.id}</td>
       <td>${fmt(u.width)}×${fmt(u.height)}</td>
+      <td>${u.grain ? grainProductLabel(u.grain) : '不限'}</td>
       <td>${u.placed} / ${u.total}</td>
       <td class="badge-bad">${u.quantity} 件排不下</td>
     </tr>
@@ -328,7 +373,7 @@ function renderUnplaced(r, heading = '排不下的成品') {
   $('unplaced').innerHTML = `
     <h3>${heading}</h3>
     <table>
-      <thead><tr><th>名称</th><th>规格 宽×高 (mm)</th><th>已排/需求</th><th>剩余</th></tr></thead>
+      <thead><tr><th>名称</th><th>规格 宽×高 (mm)</th><th>纹向要求</th><th>已排/需求</th><th>剩余</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   `;
@@ -448,7 +493,7 @@ function renderCost(data) {
     <h3 style="font-size:14px;margin:0 0 8px">各纸型用量与成本</h3>
     <table>
       <thead><tr>
-        <th>纸型</th><th>规格 宽×高 (mm)</th><th class="num">单价（元/张）</th>
+        <th>纸型</th><th>规格 宽×高 (mm)</th><th>纹向</th><th class="num">单价（元/张）</th>
         <th class="num">库存</th><th class="num">已用</th><th class="num">剩余库存</th>
         <th class="num">已排面积 (mm²)</th><th class="num">小计成本</th>
       </tr></thead>
@@ -457,6 +502,7 @@ function renderCost(data) {
           <tr class="${u.used > 0 ? '' : 'unused'}">
             <td><span class="paper-cell"><span class="dot" style="background:${colorFor(u.id)}"></span>${u.name}（${u.id}）</span></td>
             <td>${fmt(u.width)}×${fmt(u.height)}</td>
+            <td>${grainPaperLabel(u.grain)}</td>
             <td class="num">${money(u.price)}</td>
             <td class="num">${u.stock}</td>
             <td class="num">${u.used}</td>
@@ -498,6 +544,7 @@ function showCostSheet(i) {
     <span>第 <b>${sh.round}</b> 轮用纸</span>
     <span>纸型：<span class="paper-cell"><span class="dot" style="background:${colorFor(sh.paperId)}"></span><b>${sh.paperName}</b>（${sh.paperId}）</span></span>
     <span>纸面：<b>${fmt(sh.paperWidth)}×${fmt(sh.paperHeight)}</b> mm</span>
+    <span>纹向：<b>${grainPaperLabel(sh.paperGrain)}</b></span>
     <span>单价：<b>${money(sh.price)}</b>/张</span>
     <span>已排：<b>${sh.piecesPlaced}</b> 件 / ${fmt(sh.placedArea)} mm²</span>
     <span>入选指标：<b>${money(sh.costPerM2)}/m²</b>（单位已排成品面积成本）</span>
@@ -634,9 +681,10 @@ document.querySelectorAll('input[name="mode"]').forEach((r) =>
     const cost = mode === 'cost';
     $('batchOpts').hidden = !batch;
     $('costOpts').hidden = !cost;
-    // 成本模式下纸张宽高与常用纸度不适用（候选在纸型表格中录入）
+    // 成本模式下纸张宽高、纹向与常用纸度不适用（候选在纸型表格中录入）
     $('paperWLabel').hidden = cost;
     $('paperHLabel').hidden = cost;
+    $('paperGrainLabel').hidden = cost;
     $('presetLabel').hidden = cost;
     $('generate').textContent = cost ? '生成成本排产方案'
       : batch ? '生成排产方案' : '生成裁切方案';

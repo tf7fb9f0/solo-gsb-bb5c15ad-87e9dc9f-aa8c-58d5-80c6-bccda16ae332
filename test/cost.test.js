@@ -327,3 +327,126 @@ test('成本：未命名纸型自动命名，返回结构含完整字段', () =>
     }
   }
 });
+
+/* ---------------- 纹向约束 ---------------- */
+
+test('成本纹向：纸型默认沿宽，非法纹向与非法成品纹向要求校验', () => {
+  const r = layoutCostBatch({
+    kerf: 0,
+    papers: [
+      { width: 100, height: 100, price: 1, stock: 1 },
+      { width: 200, height: 200, price: 2, stock: 1 },
+    ],
+    products: [{ width: 50, height: 50, quantity: 1 }],
+  });
+  assert.strictEqual(r.papers[0].grain, 'width');
+  assert.strictEqual(r.papers[1].grain, 'width');
+  assert.strictEqual(r.usage[0].grain, 'width');
+  assert.strictEqual(r.sheets[0].paperGrain, 'width');
+
+  const pair = (patch) => [
+    { name: 'A', width: 100, height: 100, price: 1, stock: 1 },
+    { name: 'B', width: 100, height: 100, price: 1, stock: 1, ...patch },
+  ];
+  assert.throws(() => layoutCostBatch({
+    kerf: 0, papers: pair({ grain: 'diag' }), products: [],
+  }), /纹向/);
+  assert.throws(() => layoutCostBatch({
+    kerf: 0, papers: pair({}),
+    products: [{ width: 10, height: 10, quantity: 1, grain: 'x' }],
+  }), /纹向/);
+});
+
+test('成本纹向：便宜纸型因纹向不可行时被排除出候选，贵纸型胜出', () => {
+  // 成品 120×40 沿自身宽：沿宽纸上禁止旋转，100 宽放不下 → S1 不可行；
+  // S2 200×200 未旋转即可排入
+  const r = layoutCostBatch({
+    kerf: 0,
+    papers: [
+      { name: '便宜但纹向不合', width: 100, height: 300, grain: 'width', price: 1, stock: 5 },
+      { name: '贵但可行', width: 200, height: 200, grain: 'width', price: 10, stock: 5 },
+    ],
+    products: [{ width: 120, height: 40, quantity: 2, grain: 'width' }],
+  });
+  assert.strictEqual(r.stopReason, 'completed');
+  assert.strictEqual(r.sheets.length, 1);
+  assert.strictEqual(r.sheets[0].paperId, 'S2');
+  // 不可行纸型不进入候选排名
+  assert.strictEqual(r.sheets[0].selection.ranked.length, 1);
+  assert.strictEqual(r.sheets[0].selection.ranked[0].paperId, 'S2');
+  assert.strictEqual(r.usage[0].used, 0);
+  assert.strictEqual(r.usage[0].remainingStock, 5);
+  for (const it of r.sheets[0].layout.items) {
+    assert.strictEqual(it.rotated, false);
+    assert.strictEqual(it.grainOk, true);
+  }
+});
+
+test('成本纹向：纹向要求随剩余需求逐轮传递，仅纹向匹配的纸型被反复选用', () => {
+  // 成品需旋转（沿自身宽 × 沿高纸）；S2 更便宜但沿宽 → 每轮都不可行
+  const r = layoutCostBatch({
+    kerf: 0,
+    papers: [
+      { name: '沿高纸', width: 100, height: 300, grain: 'height', price: 2, stock: 5 },
+      { name: '沿宽纸', width: 100, height: 300, grain: 'width', price: 1, stock: 5 },
+    ],
+    products: [{ width: 120, height: 40, quantity: 6, grain: 'width' }],
+  });
+  assert.strictEqual(r.stopReason, 'completed');
+  assert.strictEqual(r.sheets.length, 2); // 每张旋转后 40×120 排 4 件
+  assert.ok(r.sheets.every((s) => s.paperId === 'S1'));
+  assert.ok(r.sheets.every((s) => s.paperGrain === 'height'));
+  for (const sh of r.sheets) {
+    for (const it of sh.layout.items) {
+      assert.strictEqual(it.rotated, true);
+      assert.strictEqual(it.grainOk, true);
+    }
+  }
+  assert.strictEqual(r.usage[1].used, 0);
+  assert.strictEqual(r.usage[1].remainingStock, 5);
+});
+
+test('成本纹向：所有有库存纸型因纹向放不下时 no-progress 且不扣库存', () => {
+  // 两种沿宽纸都只有旋转才放得下 120×40，但成品沿自身宽禁止旋转
+  const r = layoutCostBatch({
+    kerf: 0,
+    papers: [
+      { name: 'A', width: 100, height: 300, grain: 'width', price: 1, stock: 3 },
+      { name: 'B', width: 90, height: 400, grain: 'width', price: 1, stock: 3 },
+    ],
+    products: [{ width: 120, height: 40, quantity: 1, grain: 'width' }],
+  });
+  assert.strictEqual(r.stopReason, 'no-progress');
+  assert.strictEqual(r.sheets.length, 0);
+  assert.strictEqual(r.summary.totalCost, 0);
+  assert.deepStrictEqual(r.usage.map((u) => u.remainingStock), [3, 3]);
+  assert.strictEqual(r.remaining[0].quantity, 1);
+  assert.strictEqual(r.remaining[0].grain, 'width');
+});
+
+test('成本纹向：混合纹向需求按纸型纹向分配，排名指标只含可行候选', () => {
+  // A 件沿自身宽（沿宽纸未旋转可排）、B 件沿自身高（沿宽纸必须旋转）
+  const r = layoutCostBatch({
+    kerf: 0,
+    papers: [
+      { name: '沿宽纸', width: 200, height: 200, grain: 'width', price: 2, stock: 5 },
+      { name: '沿高纸', width: 200, height: 200, grain: 'height', price: 2, stock: 5 },
+    ],
+    products: [
+      { id: 'A', width: 100, height: 50, quantity: 2, grain: 'width' },
+      { id: 'B', width: 60, height: 150, quantity: 2, grain: 'height' },
+    ],
+  });
+  assert.strictEqual(r.stopReason, 'completed');
+  for (const sh of r.sheets) {
+    for (const it of sh.layout.items) {
+      assert.strictEqual(it.grainOk, true);
+      // 沿宽纸上 A 不旋转、B 旋转；沿高纸上恰好相反
+      if (sh.paperGrain === 'width') {
+        assert.strictEqual(it.rotated, it.id === 'B');
+      } else {
+        assert.strictEqual(it.rotated, it.id === 'A');
+      }
+    }
+  }
+});

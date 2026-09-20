@@ -2,7 +2,7 @@
 
 const assert = require('node:assert');
 const { test } = require('node:test');
-const { layout, layoutBatch } = require('../src/packer');
+const { layout, layoutBatch, orientAllowed } = require('../src/packer');
 
 const EPS = 1e-6;
 
@@ -277,4 +277,150 @@ test('批量：maxSheets 与成品输入校验', () => {
   assert.throws(() =>
     layoutBatch({ paperW: 100, paperH: 100, kerf: 1, maxSheets: 3, products: [{ width: -1, height: 10, quantity: 1 }] })
   );
+});
+
+/* ---------------- 纹向约束 ---------------- */
+
+test('纹向：orientAllowed 平行矩阵（不限/沿宽/沿高 × 纸纹向 × 旋转）', () => {
+  // 不限：两种朝向都允许
+  assert.strictEqual(orientAllowed('any', 'width', false), true);
+  assert.strictEqual(orientAllowed('any', 'width', true), true);
+  assert.strictEqual(orientAllowed('any', 'height', true), true);
+  // 同轴：仅未旋转平行
+  assert.strictEqual(orientAllowed('width', 'width', false), true);
+  assert.strictEqual(orientAllowed('width', 'width', true), false);
+  assert.strictEqual(orientAllowed('height', 'height', false), true);
+  assert.strictEqual(orientAllowed('height', 'height', true), false);
+  // 异轴：仅旋转 90° 后平行
+  assert.strictEqual(orientAllowed('width', 'height', false), false);
+  assert.strictEqual(orientAllowed('width', 'height', true), true);
+  assert.strictEqual(orientAllowed('height', 'width', false), false);
+  assert.strictEqual(orientAllowed('height', 'width', true), true);
+});
+
+test('纹向：沿宽纸 + 沿自身宽成品禁止旋转，仅旋转能放下的件排不进', () => {
+  // 成品 120×40 在 100×300 纸上只有旋转（40×120）才放得下
+  const r = layout({
+    paperW: 100, paperH: 300, kerf: 0, paperGrain: 'width',
+    products: [{ width: 120, height: 40, quantity: 1, grain: 'width' }],
+  });
+  assert.strictEqual(r.stats.piecesPlaced, 0);
+  assert.strictEqual(r.unplaced.length, 1);
+  assert.strictEqual(r.unplaced[0].grain, 'width');
+  assert.strictEqual(r.paper.grain, 'width');
+  // 对照：同尺寸不限纹向时可旋转排入
+  const r2 = layout({
+    paperW: 100, paperH: 300, kerf: 0, paperGrain: 'width',
+    products: [{ width: 120, height: 40, quantity: 1 }],
+  });
+  assert.strictEqual(r2.stats.piecesPlaced, 1);
+  assert.strictEqual(r2.items[0].rotated, true);
+  assert.strictEqual(r2.items[0].grain, 'any');
+  assert.strictEqual(r2.items[0].grainOk, true);
+});
+
+test('纹向：沿高纸 + 沿自身宽成品必须旋转 90°，结果标明朝向与匹配状态', () => {
+  const r = layout({
+    paperW: 100, paperH: 300, kerf: 0, paperGrain: 'height',
+    products: [{ width: 120, height: 40, quantity: 2, grain: 'width' }],
+  });
+  assert.strictEqual(r.stats.piecesPlaced, 2);
+  assert.strictEqual(r.paper.grain, 'height');
+  for (const it of r.items) {
+    assert.strictEqual(it.rotated, true);   // 实际朝向：旋转 90°
+    assert.strictEqual(it.w, 40);
+    assert.strictEqual(it.h, 120);
+    assert.strictEqual(it.grain, 'width');  // 成品纹向要求
+    assert.strictEqual(it.grainOk, true);   // 纹向匹配状态
+  }
+});
+
+test('纹向：沿宽纸 + 沿自身高成品必须旋转，未旋转朝向被排除', () => {
+  // 成品 60×150 沿自身高；沿宽纸上只有旋转（150×60）纹向才平行
+  const r = layout({
+    paperW: 200, paperH: 100, kerf: 0, paperGrain: 'width',
+    products: [{ width: 60, height: 150, quantity: 1, grain: 'height' }],
+  });
+  assert.strictEqual(r.stats.piecesPlaced, 1);
+  assert.strictEqual(r.items[0].rotated, true);
+  assert.strictEqual(r.items[0].grainOk, true);
+  // 同纸同纹向下，沿自身宽的同规格成品未旋转即可排入
+  const r2 = layout({
+    paperW: 200, paperH: 100, kerf: 0, paperGrain: 'width',
+    products: [{ width: 150, height: 60, quantity: 1, grain: 'width' }],
+  });
+  assert.strictEqual(r2.items[0].rotated, false);
+  assert.strictEqual(r2.items[0].grainOk, true);
+});
+
+test('纹向：混合纹向要求的成品各自采用合法朝向', () => {
+  const r = layout({
+    paperW: 200, paperH: 200, kerf: 0, paperGrain: 'width',
+    products: [
+      { id: 'A', width: 100, height: 50, quantity: 1, grain: 'width' },  // 仅未旋转
+      { id: 'B', width: 150, height: 60, quantity: 1, grain: 'height' }, // 仅旋转
+      { id: 'C', width: 30, height: 30, quantity: 1 },                   // 不限
+    ],
+  });
+  assert.strictEqual(r.stats.piecesPlaced, 3);
+  const a = r.items.find((i) => i.id === 'A');
+  const b = r.items.find((i) => i.id === 'B');
+  assert.strictEqual(a.rotated, false);
+  assert.strictEqual(b.rotated, true);
+  for (const it of r.items) assert.strictEqual(it.grainOk, true);
+});
+
+test('纹向：非法纸张纹向与成品纹向要求抛错', () => {
+  assert.throws(() =>
+    layout({ paperW: 100, paperH: 100, kerf: 0, paperGrain: 'diag', products: [] }),
+    /纹向/);
+  assert.throws(() =>
+    layout({ paperW: 100, paperH: 100, kerf: 0, products: [{ width: 10, height: 10, quantity: 1, grain: 'x' }] }),
+    /纹向/);
+  // 省略时默认：纸张沿宽、成品不限
+  const r = layout({ paperW: 100, paperH: 100, kerf: 0, products: [] });
+  assert.strictEqual(r.paper.grain, 'width');
+});
+
+test('批量纹向：约束跨张传递，首张开不出即 no-progress 且剩余带纹向', () => {
+  const r = layoutBatch({
+    paperW: 100, paperH: 300, kerf: 0, maxSheets: 3, paperGrain: 'width',
+    products: [{ width: 120, height: 40, quantity: 2, grain: 'width' }],
+  });
+  assert.strictEqual(r.stopReason, 'no-progress');
+  assert.strictEqual(r.summary.sheetsUsed, 0);
+  assert.strictEqual(r.remaining[0].quantity, 2);
+  assert.strictEqual(r.remaining[0].grain, 'width');
+});
+
+test('批量纹向：先排不限纹向件，剩余纹向件开不出时止损且已排张保留', () => {
+  const r = layoutBatch({
+    paperW: 100, paperH: 300, kerf: 0, maxSheets: 5, paperGrain: 'width',
+    products: [
+      { id: 'A', width: 90, height: 90, quantity: 1 },                  // 不限，首张可排
+      { id: 'B', width: 120, height: 40, quantity: 2, grain: 'width' }, // 旋转被禁，永远排不进
+    ],
+  });
+  assert.strictEqual(r.stopReason, 'no-progress');
+  assert.strictEqual(r.summary.sheetsUsed, 1);
+  assert.strictEqual(r.summary.piecesPlaced, 1);
+  const b = r.remaining.find((u) => u.id === 'B');
+  assert.strictEqual(b.quantity, 2);
+  assert.strictEqual(b.grain, 'width');
+});
+
+test('批量纹向：沿高纸上逐张旋转排入，全部件朝向与纹向匹配', () => {
+  const r = layoutBatch({
+    paperW: 100, paperH: 300, kerf: 0, maxSheets: 5, paperGrain: 'height',
+    products: [{ width: 120, height: 40, quantity: 6, grain: 'width' }],
+  });
+  assert.strictEqual(r.stopReason, 'completed');
+  assert.strictEqual(r.summary.sheetsUsed, 2); // 每张旋转后 40×120 排 4 件
+  for (const sh of r.sheets) {
+    assert.strictEqual(sh.paper.grain, 'height');
+    for (const it of sh.items) {
+      assert.strictEqual(it.rotated, true);
+      assert.strictEqual(it.grainOk, true);
+    }
+  }
 });
